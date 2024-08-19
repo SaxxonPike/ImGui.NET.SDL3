@@ -125,6 +125,16 @@ public static unsafe class ImGuiSdl3
         if (ctxData != null)
             return;
 
+        var io = ImGui.GetIO();
+
+        io.BackendFlags = ImGuiBackendFlags.RendererHasVtxOffset |
+                          ImGuiBackendFlags.HasGamepad |
+                          ImGuiBackendFlags.HasMouseCursors |
+                          ImGuiBackendFlags.HasSetMousePos;
+
+        var vp = ImGui.GetMainViewport();
+        vp.PlatformHandle = (IntPtr)window;
+
         //
         // Configure the context for rendering using this backend.
         //
@@ -134,30 +144,26 @@ public static unsafe class ImGuiSdl3
             Renderer = renderer,
             Window = window,
             LastTime = SDL_GetTicksNS(),
-            Context = ctx
+            Context = ctx,
+            PlatformSetImeDataCallback = PlatformSetImeData,
+            GetClipboardCallback = GetClipboard,
+            SetClipboardCallback = SetClipboard
         };
 
-        var io = ImGui.GetIO();
+        //
+        // Configure callbacks. These references must be kept so that the
+        // GC does not free them.
+        //
 
-        io.BackendFlags |= ImGuiBackendFlags.RendererHasVtxOffset |
-                           ImGuiBackendFlags.HasGamepad |
-                           ImGuiBackendFlags.HasMouseCursors;
-
-        var vp = ImGui.GetMainViewport();
-        vp.PlatformHandle = (IntPtr)window;
-
-        ctxData.PlatformSetImeDataCallback = PlatformSetImeData;
         io.PlatformSetImeDataFn = Marshal.GetFunctionPointerForDelegate(
-            ctxData.PlatformSetImeDataCallback);
+            ctxData.PlatformSetImeDataCallback!);
 
-        ctxData.GetClipboardCallback = GetClipboard;
         io.GetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
-            ctxData.GetClipboardCallback);
+            ctxData.GetClipboardCallback!);
 
-        ctxData.SetClipboardCallback = SetClipboard;
         io.SetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
-            ctxData.SetClipboardCallback);
-        
+            ctxData.SetClipboardCallback!);
+
         //
         // Create the atlas texture that will be used and assign it to the
         // context. This texture ID is what will be populated in the draw list
@@ -260,6 +266,13 @@ public static unsafe class ImGuiSdl3
         RequireContextData(out var ctxData);
 
         //
+        // If NewFrame was already called, do nothing.
+        //
+
+        if (ctxData.BegunFrame)
+            return;
+
+        //
         // Determine the amount of time that has elapsed since the last frame.
         //
 
@@ -288,6 +301,16 @@ public static unsafe class ImGuiSdl3
         io.DisplayFramebufferScale.Y = scaleY;
 
         //
+        // Update input for this frame.
+        //
+
+        if (io.WantSetMousePos)
+            SDL_WarpMouseInWindow(ctxData.Window, io.MousePos.X, io.MousePos.Y);
+
+        if ((io.ConfigFlags & ImGuiConfigFlags.NoMouseCursorChange) == 0)
+            SetMouseCursor(ctxData, ImGui.GetMouseCursor());
+
+        //
         // Mark the current frame in progress.
         //
 
@@ -304,6 +327,13 @@ public static unsafe class ImGuiSdl3
     public static void RenderDrawData(ImDrawDataPtr drawData)
     {
         RequireContextData(out var ctxData);
+
+        //
+        // If RenderDrawData was already called, do nothing.
+        //
+
+        if (!ctxData.BegunFrame)
+            return;
 
         //
         // Indicate the end of this frame and make sure SDL render buffers
@@ -1285,13 +1315,5 @@ public static unsafe class ImGuiSdl3
                 }
             }
         }
-
-        //
-        // If ImGui has indicated the mouse cursor should be changed,
-        // do that here.
-        //
-
-        if ((io.ConfigFlags & ImGuiConfigFlags.NoMouseCursorChange) == 0)
-            SetMouseCursor(ctxData, ImGui.GetMouseCursor());
     }
 }
