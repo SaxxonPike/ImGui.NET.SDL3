@@ -125,12 +125,19 @@ public static unsafe class ImGuiSdl3
         if (ctxData != null)
             return;
 
+        //
+        // Set up backend IO flags. These tell ImGui what is supported by this
+        // backend.
+        //
+        
         var io = ImGui.GetIO();
 
         io.BackendFlags = ImGuiBackendFlags.RendererHasVtxOffset |
-                          ImGuiBackendFlags.HasGamepad |
                           ImGuiBackendFlags.HasMouseCursors |
                           ImGuiBackendFlags.HasSetMousePos;
+
+        if (SDL_WasInit(SDL_InitFlags.SDL_INIT_GAMEPAD) == SDL_InitFlags.SDL_INIT_GAMEPAD)
+            io.BackendFlags |= ImGuiBackendFlags.HasGamepad;
 
         var vp = ImGui.GetMainViewport();
         vp.PlatformHandle = (IntPtr)window;
@@ -1223,7 +1230,7 @@ public static unsafe class ImGuiSdl3
             var cmdList = drawData.CmdLists[n];
             var vtxBuffer = cmdList.VtxBuffer;
             var idxBuffer = cmdList.IdxBuffer;
-
+            
             for (var cmdI = 0; cmdI < cmdList.CmdBuffer.Size; cmdI++)
             {
                 var pcmd = cmdList.CmdBuffer[cmdI];

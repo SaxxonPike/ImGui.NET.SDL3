@@ -63,6 +63,15 @@ unsafe
                       ImGuiConfigFlags.NavEnableGamepad;
 
     //
+    // Start reading all current gamepads.
+    //
+
+    var gamepads = new Dictionary<SDL_JoystickID, IntPtr>();
+    var gamepadIds = SDL_GetGamepads()!;
+    for (var i = 0; i < gamepadIds.Count; i++)
+        gamepads[gamepadIds[i]] = (IntPtr)SDL_OpenGamepad(gamepadIds[i]);
+
+    //
     // Set up some parameters for the event loop.
     //
 
@@ -88,14 +97,35 @@ unsafe
             ImGuiSdl3.ProcessEvent(&ev);
 
             //
-            // Handle quit/close events from SDL.
+            // Handle some events from SDL.
             //
 
             switch (ev.Type)
             {
+                //
+                // Handle when the app should close.
+                //
+
                 case SDL_EventType.SDL_EVENT_QUIT:
                 case SDL_EventType.SDL_EVENT_WINDOW_CLOSE_REQUESTED when ev.window.windowID == SDL_GetWindowID(window):
                     done = true;
+                    break;
+
+                //
+                // Handle when gamepads connect.
+                //
+
+                case SDL_EventType.SDL_EVENT_GAMEPAD_ADDED:
+                    gamepads[ev.gdevice.which] = (IntPtr)SDL_OpenGamepad(ev.gdevice.which);
+                    break;
+
+                //
+                // Handle when gamepads disconnect.
+                //
+
+                case SDL_EventType.SDL_EVENT_GAMEPAD_REMOVED:
+                    if (gamepads.TryGetValue(ev.gdevice.which, out var gamepad))
+                        SDL_CloseGamepad((SDL_Gamepad*)gamepad);
                     break;
             }
         }
