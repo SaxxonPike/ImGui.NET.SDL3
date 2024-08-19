@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
 using SDL;
 using static SDL.SDL3;
 using GamepadEventValue = (
@@ -18,6 +19,22 @@ namespace ImGuiNET.SDL3;
 /// </summary>
 public static unsafe class ImGuiSdl3
 {
+    /// <summary>
+    /// Function definition for a callback to set clipboard data.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [return: MarshalUsing(typeof(Utf8StringMarshaller))]
+    private delegate string? ImGuiGetClipboardCallback(IntPtr ctx);
+
+    /// <summary>
+    /// Function definition for a callback to set clipboard data.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ImGuiSetClipboardCallback(
+        IntPtr ctx,
+        [MarshalUsing(typeof(Utf8StringMarshaller))]
+        string? text);
+
     /// <summary>
     /// Function definition for a callback that can be specified instead of
     /// the standard rendering pipeline.
@@ -67,6 +84,8 @@ public static unsafe class ImGuiSdl3
         public ulong LastTime;
         public SDL_Renderer* Renderer;
         public ImGuiPlatformSetImeDataCallback? PlatformSetImeDataCallback;
+        public ImGuiGetClipboardCallback? GetClipboardCallback;
+        public ImGuiSetClipboardCallback? SetClipboardCallback;
         public SDL_Window* Window;
         public SDL_Window* ImeWindow;
         public bool BegunFrame;
@@ -92,13 +111,7 @@ public static unsafe class ImGuiSdl3
     /// </exception>
     public static void Init(SDL_Window* window, SDL_Renderer* renderer)
     {
-        //
-        // Check to make sure we have an ImGui context first.
-        //
-
-        var ctx = ImGui.GetCurrentContext();
-        if (ctx == IntPtr.Zero)
-            ImGuiSdl3Exception.ThrowNoContext();
+        RequireContext(out var ctx);
 
         //
         // Check to see if this context has been initialized with the same
@@ -137,6 +150,14 @@ public static unsafe class ImGuiSdl3
         io.PlatformSetImeDataFn = Marshal.GetFunctionPointerForDelegate(
             ctxData.PlatformSetImeDataCallback);
 
+        ctxData.GetClipboardCallback = GetClipboard;
+        io.GetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
+            ctxData.GetClipboardCallback);
+
+        ctxData.SetClipboardCallback = SetClipboard;
+        io.SetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
+            ctxData.SetClipboardCallback);
+        
         //
         // Create the atlas texture that will be used and assign it to the
         // context. This texture ID is what will be populated in the draw list
@@ -186,13 +207,7 @@ public static unsafe class ImGuiSdl3
     /// </summary>
     public static void Shutdown()
     {
-        //
-        // Check to make sure we have an ImGui context first.
-        //
-
-        var ctx = ImGui.GetCurrentContext();
-        if (ctx == IntPtr.Zero)
-            ImGuiSdl3Exception.ThrowNoContext();
+        RequireContext(out var ctx);
 
         //
         // If this context hasn't been initialized, nothing to do.
@@ -242,20 +257,7 @@ public static unsafe class ImGuiSdl3
     /// </summary>
     public static void NewFrame()
     {
-        //
-        // Check to make sure we have an ImGui context first.
-        //
-
-        var ctx = ImGui.GetCurrentContext();
-        if (ctx == IntPtr.Zero)
-            ImGuiSdl3Exception.ThrowNoContext();
-
-        //
-        // Check to make sure we have initialized the current ImGui context.
-        //
-
-        if (!Contexts.TryGetValue(ctx, out var ctxData))
-            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+        RequireContextData(out var ctxData);
 
         //
         // Determine the amount of time that has elapsed since the last frame.
@@ -301,20 +303,7 @@ public static unsafe class ImGuiSdl3
     /// </param>
     public static void RenderDrawData(ImDrawDataPtr drawData)
     {
-        //
-        // Check to make sure we have an ImGui context first.
-        //
-
-        var ctx = ImGui.GetCurrentContext();
-        if (ctx == IntPtr.Zero)
-            ImGuiSdl3Exception.ThrowNoContext();
-
-        //
-        // Check to make sure we have initialized the current ImGui context.
-        //
-
-        if (!Contexts.TryGetValue(ctx, out var ctxData))
-            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+        RequireContextData(out var ctxData);
 
         //
         // Indicate the end of this frame and make sure SDL render buffers
@@ -406,20 +395,7 @@ public static unsafe class ImGuiSdl3
     /// </param>
     public static void ProcessEvent(SDL_Event* ev)
     {
-        //
-        // Check to make sure we have an ImGui context first.
-        //
-
-        var ctx = ImGui.GetCurrentContext();
-        if (ctx == IntPtr.Zero)
-            ImGuiSdl3Exception.ThrowNoContext();
-
-        //
-        // Check to make sure we have initialized the current ImGui context.
-        //
-
-        if (!Contexts.TryGetValue(ctx, out var ctxData))
-            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+        RequireContextData(out var ctxData);
 
         //
         // Process the event.
@@ -590,6 +566,52 @@ public static unsafe class ImGuiSdl3
     }
 
     /// <summary>
+    /// Require the current ImGui context to be set.
+    /// </summary>
+    private static void RequireContext(out IntPtr ctx)
+    {
+        ctx = ImGui.GetCurrentContext();
+        if (ctx == IntPtr.Zero)
+            ImGuiSdl3Exception.ThrowNoContext();
+    }
+
+    /// <summary>
+    /// Require that the backend be initialized with the specified ImGui context.
+    /// </summary>
+    private static void RequireContextData(IntPtr ctx, out CtxData ctxData)
+    {
+        if (!Contexts.TryGetValue(ctx, out ctxData!))
+            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+    }
+
+    /// <summary>
+    /// Require that the backend be initialized with the current ImGui context.
+    /// </summary>
+    private static void RequireContextData(out CtxData ctxData)
+    {
+        RequireContext(out var ctx);
+        RequireContextData(ctx, out ctxData);
+    }
+
+    /// <summary>
+    /// Handles when ImGui wishes to set clipboard data.
+    /// </summary>
+    private static void SetClipboard(IntPtr ctx, string? data)
+    {
+        if (SDL_SetClipboardText(data) != 0)
+            Debug.WriteLine("Failed to set clipboard: {0}",
+                [SDL_GetError()]);
+    }
+
+    /// <summary>
+    /// Handles when ImGui wishes to get clipboard data.
+    /// </summary>
+    private static string? GetClipboard(IntPtr ctx)
+    {
+        return SDL_GetClipboardText();
+    }
+
+    /// <summary>
     /// Handles when IME data is available for an ImGui context. This is called
     /// directly by ImGui to obtain information about an input mechanism such
     /// as a virtual keyboard, or to interact with such input mechanism.
@@ -608,12 +630,7 @@ public static unsafe class ImGuiSdl3
         ImGuiViewport* viewport,
         ImGuiPlatformImeData* data)
     {
-        //
-        // Check to make sure we have initialized the current ImGui context.
-        //
-
-        if (!Contexts.TryGetValue(ctx, out var ctxData))
-            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+        RequireContextData(ctx, out var ctxData);
 
         //
         // If the current IME window should close, or the focused window has
@@ -1219,7 +1236,7 @@ public static unsafe class ImGuiSdl3
                     //
                     // If the clip rect can't be set, skip rendering.
                     //
-                    
+
                     if (SDL_SetRenderClipRect(ctxData.Renderer, &clip) != 0)
                         continue;
 
@@ -1249,18 +1266,18 @@ public static unsafe class ImGuiSdl3
                     //
 
                     var renderResult = SDL_RenderGeometryRaw(
-                            ctxData.Renderer,
-                            sdlTexture,
-                            (float*)&vtxBufferPtr->pos,
-                            sizeof(ImDrawVert),
-                            (SDL_FColor*)colorBuf,
-                            sizeof(SDL_FColor),
-                            (float*)&vtxBufferPtr->uv,
-                            sizeof(ImDrawVert),
-                            (int)(vtxBuffer.Size - pcmd.VtxOffset),
-                            (IntPtr)idxBufferPtr,
-                            (int)pcmd.ElemCount,
-                            sizeof(ushort));
+                        ctxData.Renderer,
+                        sdlTexture,
+                        (float*)&vtxBufferPtr->pos,
+                        sizeof(ImDrawVert),
+                        (SDL_FColor*)colorBuf,
+                        sizeof(SDL_FColor),
+                        (float*)&vtxBufferPtr->uv,
+                        sizeof(ImDrawVert),
+                        (int)(vtxBuffer.Size - pcmd.VtxOffset),
+                        (IntPtr)idxBufferPtr,
+                        (int)pcmd.ElemCount,
+                        sizeof(ushort));
 
                     if (renderResult != 0)
                         Debug.WriteLine("Failed to render geometry: {0}",
