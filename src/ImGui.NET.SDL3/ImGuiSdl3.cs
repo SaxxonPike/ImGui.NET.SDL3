@@ -1,51 +1,131 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using ImGuiNET.SDL3;
 using SDL;
 using static SDL.SDL3;
+using GamepadEventValue = (
+    ImGuiNET.ImGuiKey? Input1,
+    float Value1,
+    ImGuiNET.ImGuiKey?
+    Input2, float Value2);
 
 // ReSharper disable once CheckNamespace
 
 namespace ImGuiNET.SDL3;
 
+/// <summary>
+/// ImGui backend for SDL3.
+/// </summary>
 public static unsafe class ImGuiSdl3
 {
+    /// <summary>
+    /// Function definition for a callback that can be specified instead of
+    /// the standard rendering pipeline.
+    /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ImGuiUserCallback(
         ImDrawList* cmdList,
         ImDrawCmd* drawCmd);
 
+    /// <summary>
+    /// Function definition for a callback for when an input interface is
+    /// activated (such as virtual keyboards, etc.)
+    /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ImGuiPlatformSetImeDataCallback(
         IntPtr ctx,
         ImGuiViewport* viewport,
         ImGuiPlatformImeData* data);
 
-    private const short StickDeadZone = 8192;
-    private const float StickActiveZone = 32768 - StickDeadZone;
+    /// <summary>
+    /// Gamepad stick dead zone. This determines how far from center the stick
+    /// must be in order to be counted as inputs for ImGui control.
+    /// </summary>
+    private const float DefaultDeadZone = 0.2f;
 
-    private static bool _begun;
-    private static IntPtr _ctx;
-    private static readonly SDL_Cursor*[] Cursors = new SDL_Cursor*[(int)ImGuiMouseCursor.COUNT];
-    private static SDL_Texture* _texture;
-    private static ulong _lastTime;
-    private static Vector4 _renderRect;
-    private static SDL_Renderer* _renderer;
-    private static SDL_Window* _window;
-    private static ImGuiPlatformSetImeDataCallback? _platformSetImeDataCallback;
-    private static SDL_Window* _imeWindow;
-    private static bool _initted;
+    /// <summary>
+    /// Number of mouse cursors that ImGui may use.
+    /// </summary>
+    private const int CursorCount = (int)ImGuiMouseCursor.COUNT;
 
+    /// <summary>
+    /// Stores data for all contexts for which this backend has been
+    /// initialized.
+    /// </summary>
+    private static readonly Dictionary<IntPtr, CtxData> Contexts = [];
+
+    /// <summary>
+    /// Stores data associated to a single ImGui context.
+    /// </summary>
+    private class CtxData
+    {
+        public IntPtr Context;
+        public readonly SDL_Cursor*[] Cursors = new SDL_Cursor*[CursorCount];
+        public float StickDeadZone = DefaultDeadZone;
+        public float StickActiveZone => 1 - StickDeadZone;
+        public SDL_Texture* Texture;
+        public ulong LastTime;
+        public SDL_Renderer* Renderer;
+        public ImGuiPlatformSetImeDataCallback? PlatformSetImeDataCallback;
+        public SDL_Window* Window;
+        public SDL_Window* ImeWindow;
+        public bool BegunFrame;
+    }
+
+    /// <summary>
+    /// Initialize this backend for the current ImGui context. If the context
+    /// has already been initialized with the specified window and renderer,
+    /// this call does nothing.
+    /// </summary>
+    /// <param name="window">
+    /// SDL window to associate with the context.
+    /// </param>
+    /// <param name="renderer">
+    /// SDL renderer to associate with the context.
+    /// </param>
+    /// <exception cref="ImGuiSdl3Exception">
+    /// Thrown when
+    /// - There is no current context
+    /// - The current context has been initialized with a different window or
+    ///   renderer.
+    /// - 
+    /// </exception>
     public static void Init(SDL_Window* window, SDL_Renderer* renderer)
     {
-        if (_initted)
-            throw new Exception("This backend does not work with multiple contexts");
-        _initted = true;
-        
-        _renderer = renderer;
-        _window = window;
+        //
+        // Check to make sure we have an ImGui context first.
+        //
+
+        var ctx = ImGui.GetCurrentContext();
+        if (ctx == IntPtr.Zero)
+            ImGuiSdl3Exception.ThrowNoContext();
+
+        //
+        // Check to see if this context has been initialized with the same
+        // properties. If so, nothing needs to be done.
+        //
+
+        if (Contexts.TryGetValue(ctx, out var ctxData) &&
+            (ctxData.Window != window || ctxData.Renderer != renderer))
+            ImGuiSdl3Exception.ThrowAlreadyInitialized(ctx);
+
+        if (ctxData != null)
+            return;
+
+        //
+        // Configure the context for rendering using this backend.
+        //
+
+        ctxData = Contexts[ctx] = new CtxData
+        {
+            Renderer = renderer,
+            Window = window,
+            LastTime = SDL_GetTicksNS(),
+            Context = ctx
+        };
 
         var io = ImGui.GetIO();
+
         io.BackendFlags |= ImGuiBackendFlags.RendererHasVtxOffset |
                            ImGuiBackendFlags.HasGamepad |
                            ImGuiBackendFlags.HasMouseCursors;
@@ -53,216 +133,454 @@ public static unsafe class ImGuiSdl3
         var vp = ImGui.GetMainViewport();
         vp.PlatformHandle = (IntPtr)window;
 
-        _platformSetImeDataCallback = PlatformSetImeData;
-        io.PlatformSetImeDataFn = Marshal.GetFunctionPointerForDelegate(_platformSetImeDataCallback);
+        ctxData.PlatformSetImeDataCallback = PlatformSetImeData;
+        io.PlatformSetImeDataFn = Marshal.GetFunctionPointerForDelegate(
+            ctxData.PlatformSetImeDataCallback);
 
-        CreateFontTexture();
+        //
+        // Create the atlas texture that will be used and assign it to the
+        // context. This texture ID is what will be populated in the draw list
+        // later for any polygons that aren't a solid color.
+        //
+
+        io.Fonts.GetTexDataAsRGBA32(
+            out IntPtr pixels,
+            out var width,
+            out var height);
+
+        var surface = SDL_CreateSurfaceFrom(
+            width, height,
+            SDL_PIXELFORMAT_RGBA32,
+            pixels,
+            width * 4);
+
+        if (surface == null)
+            ImGuiSdl3Exception.ThrowSurfaceFailed(ctx);
+
+        var texture = SDL_CreateTextureFromSurface(
+            renderer,
+            surface);
+
+        if (texture == null)
+            ImGuiSdl3Exception.ThrowTextureFailed(ctx, (IntPtr)surface);
+
+        SDL_DestroySurface(surface);
+
+        var texId = (IntPtr)texture;
+
+        if (SDL_SetTextureBlendMode(
+                texture,
+                SDL_BlendMode.SDL_BLENDMODE_BLEND) != 0)
+            ImGuiSdl3Exception.ThrowBlendModeFailed(ctx, texId);
+
+        if (SDL_SetTextureScaleMode(
+                texture,
+                SDL_ScaleMode.SDL_SCALEMODE_LINEAR) != 0)
+            ImGuiSdl3Exception.ThrowScaleModeFailed(ctx, texId);
+
+        io.Fonts.SetTexID(texId);
     }
 
+    /// <summary>
+    /// Free resources used by this backend for the current ImGui context.
+    /// </summary>
     public static void Shutdown()
     {
-        if (!_initted)
+        //
+        // Check to make sure we have an ImGui context first.
+        //
+
+        var ctx = ImGui.GetCurrentContext();
+        if (ctx == IntPtr.Zero)
+            ImGuiSdl3Exception.ThrowNoContext();
+
+        //
+        // If this context hasn't been initialized, nothing to do.
+        //
+
+        if (!Contexts.TryGetValue(ctx, out var ctxData))
             return;
-        if (_texture != null)
+
+        //
+        // Clean up the atlas texture.
+        //
+
+        if (ctxData.Texture != null)
         {
-            SDL_DestroyTexture(_texture);
-            _texture = null;
+            SDL_DestroyTexture(ctxData.Texture);
+            ctxData.Texture = null;
         }
 
-        for (var i = 0; i < Cursors.Length; i++)
+        //
+        // Clean up cursors.
+        //
+
+        for (var i = 0; i < ctxData.Cursors.Length; i++)
         {
-            if (Cursors[i] == null)
+            if (ctxData.Cursors[i] == null)
                 continue;
 
-            SDL_DestroyCursor(Cursors[i]);
-            Cursors[i] = null;
+            SDL_DestroyCursor(ctxData.Cursors[i]);
+            ctxData.Cursors[i] = null;
         }
 
-        _ctx = IntPtr.Zero;
-        _platformSetImeDataCallback = null;
-        _initted = false;
+        //
+        // Clean up function pointers.
+        //
+
+        ctxData.PlatformSetImeDataCallback = null;
+
+        //
+        // Clean up context data.
+        //
+
+        Contexts.Remove(ctx);
     }
 
+    /// <summary>
+    /// Set up the current ImGui context for a new frame.
+    /// </summary>
     public static void NewFrame()
     {
-        if (_begun || !_initted)
-            return;
+        //
+        // Check to make sure we have an ImGui context first.
+        //
+
+        var ctx = ImGui.GetCurrentContext();
+        if (ctx == IntPtr.Zero)
+            ImGuiSdl3Exception.ThrowNoContext();
+
+        //
+        // Check to make sure we have initialized the current ImGui context.
+        //
+
+        if (!Contexts.TryGetValue(ctx, out var ctxData))
+            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+
+        //
+        // Determine the amount of time that has elapsed since the last frame.
+        //
 
         var io = ImGui.GetIO();
         var now = SDL_GetTicksNS();
-        var elapsed = now - _lastTime;
+        var elapsed = now - ctxData.LastTime;
+
+
+        io.DeltaTime = elapsed / (float)SDL_NS_PER_SECOND;
+
+        //
+        // Determine the render size and scale for this frame.
+        //
 
         int width, height;
-        SDL_GetRenderOutputSize(_renderer, &width, &height)
-            .AssertSdlZero();
+        if (SDL_GetRenderOutputSize(ctxData.Renderer, &width, &height) != 0)
+            (width, height) = (0, 0);
 
         float scaleX, scaleY;
-        SDL_GetRenderScale(_renderer, &scaleX, &scaleY)
-            .AssertSdlZero();
+        if (SDL_GetRenderScale(ctxData.Renderer, &scaleX, &scaleY) != 0)
+            (scaleX, scaleY) = (1, 1);
 
-        SDL_FRect renderRect;
-        SDL_GetRenderLogicalPresentationRect(_renderer, &renderRect)
-            .AssertSdlZero();
-
-        _renderRect = *(Vector4*)&renderRect;
-
-        io.DeltaTime = elapsed;
         io.DisplaySize.X = width;
         io.DisplaySize.Y = height;
         io.DisplayFramebufferScale.X = scaleX;
         io.DisplayFramebufferScale.Y = scaleY;
 
-        _begun = true;
-        ImGui.NewFrame();
+        //
+        // Mark the current frame in progress.
+        //
 
-        _lastTime = now;
+        ctxData.BegunFrame = true;
+        ctxData.LastTime = now;
     }
 
+    /// <summary>
+    /// Render an ImGui draw data structure to SDL.
+    /// </summary>
+    /// <param name="drawData">
+    /// ImGui draw data for the frame to be rendered.
+    /// </param>
     public static void RenderDrawData(ImDrawDataPtr drawData)
     {
-        if (!_begun || !_initted)
-            return;
+        //
+        // Check to make sure we have an ImGui context first.
+        //
 
-        _begun = false;
+        var ctx = ImGui.GetCurrentContext();
+        if (ctx == IntPtr.Zero)
+            ImGuiSdl3Exception.ThrowNoContext();
 
-        var hasViewport = SDL_RenderViewportSet(_renderer) == SDL_bool.SDL_TRUE;
-        var hasClipRect = SDL_RenderClipEnabled(_renderer) == SDL_bool.SDL_TRUE;
-        SDL_Rect oldViewport = default;
-        SDL_Rect oldClipRect = default;
+        //
+        // Check to make sure we have initialized the current ImGui context.
+        //
+
+        if (!Contexts.TryGetValue(ctx, out var ctxData))
+            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+
+        //
+        // Indicate the end of this frame and make sure SDL render buffers
+        // are flushed.
+        //
+
+        ctxData.BegunFrame = false;
+
+        if (SDL_FlushRenderer(ctxData.Renderer) != 0)
+            Debug.WriteLine("Failed to flush renderer before render: {0}",
+                [SDL_GetError()]);
+
+        //
+        // Preserve viewport and render clip settings on the SDL render
+        // surface.
+        //
+
+        var hasViewport =
+            SDL_RenderViewportSet(ctxData.Renderer) == SDL_bool.SDL_TRUE;
+        var hasClipRect =
+            SDL_RenderClipEnabled(ctxData.Renderer) == SDL_bool.SDL_TRUE;
+        var oldViewport = default(SDL_Rect);
+        var oldClipRect = default(SDL_Rect);
 
         if (hasViewport)
         {
-            SDL_GetRenderViewport(_renderer, &oldViewport)
-                .AssertSdlZero();
+            if (SDL_GetRenderViewport(ctxData.Renderer, &oldViewport) != 0)
+                Debug.WriteLine("Failed to retrieve render viewport: {0}",
+                    [SDL_GetError()]);
         }
 
         if (hasClipRect)
         {
-            SDL_GetRenderClipRect(_renderer, &oldClipRect)
-                .AssertSdlZero();
+            if (SDL_GetRenderClipRect(ctxData.Renderer, &oldClipRect) != 0)
+                Debug.WriteLine("Failed to retrieve render clip rectangle: {0}",
+                    [SDL_GetError()]);
         }
 
-        Render(_renderer, drawData);
+        //
+        // Render the draw list.
+        //
+
+        Render(ctxData, drawData);
+
+        //
+        // Make sure SDL finishes rendering ImGui elements.
+        //
+
+        if (SDL_FlushRenderer(ctxData.Renderer) != 0)
+            Debug.WriteLine("Failed to flush renderer after render: {0}",
+                [SDL_GetError()]);
+
+        //
+        // Restore preserved render state.
+        //
 
         if (hasViewport)
         {
-            SDL_SetRenderViewport(_renderer, &oldViewport)
-                .AssertSdlZero();
+            if (SDL_SetRenderViewport(ctxData.Renderer, &oldViewport) != 0)
+                Debug.WriteLine("Failed to set render viewport after render: {0}",
+                    [SDL_GetError()]);
         }
         else
         {
-            SDL_SetRenderViewport(_renderer, null)
-                .AssertSdlZero();
+            if (SDL_SetRenderViewport(ctxData.Renderer, null) != 0)
+                Debug.WriteLine("Failed to set render viewport after render: {0}",
+                    [SDL_GetError()]);
         }
 
         if (hasClipRect)
         {
-            SDL_SetRenderClipRect(_renderer, &oldClipRect)
-                .AssertSdlZero();
+            if (SDL_SetRenderClipRect(ctxData.Renderer, &oldClipRect) != 0)
+                Debug.WriteLine("Failed to set clip rectangle after render: {0}",
+                    [SDL_GetError()]);
         }
         else
         {
-            SDL_SetRenderClipRect(_renderer, null)
-                .AssertSdlZero();
+            if (SDL_SetRenderClipRect(ctxData.Renderer, null) != 0)
+                Debug.WriteLine("Failed to set clip rectangle after render: {0}",
+                    [SDL_GetError()]);
         }
     }
 
+    /// <summary>
+    /// Send SDL events to ImGui.
+    /// </summary>
+    /// <param name="ev">
+    /// Event to process.
+    /// </param>
     public static void ProcessEvent(SDL_Event* ev)
     {
-        if (!_initted)
-            return;
+        //
+        // Check to make sure we have an ImGui context first.
+        //
+
+        var ctx = ImGui.GetCurrentContext();
+        if (ctx == IntPtr.Zero)
+            ImGuiSdl3Exception.ThrowNoContext();
+
+        //
+        // Check to make sure we have initialized the current ImGui context.
+        //
+
+        if (!Contexts.TryGetValue(ctx, out var ctxData))
+            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+
+        //
+        // Process the event.
+        //
 
         var io = ImGui.GetIO();
 
         switch (ev->Type)
         {
-            case < SDL_EventType.SDL_EVENT_FIRST or > SDL_EventType.SDL_EVENT_LAST:
+            //
+            // Skip event IDs out of supported range.
+            //
+
+            case < SDL_EventType.SDL_EVENT_FIRST or
+                > SDL_EventType.SDL_EVENT_LAST:
+            {
                 break;
+            }
+
+            //
+            // Handle when a gamepad button is pressed down.
+            //
+
             case SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_UP:
             {
-                if (ConvertGamepadButtonEvent(ev->gbutton) is not { } nav || nav == ImGuiKey.None)
+                if (ConvertGamepadButtonEvent(ev->gbutton) is not { } key ||
+                    key == ImGuiKey.None)
                     break;
 
-                io.AddKeyEvent(nav, false);
+                io.AddKeyEvent(key, false);
                 break;
             }
+
+            //
+            // Handle when a gamepad button is released.
+            //
+
             case SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN:
             {
-                if (ConvertGamepadButtonEvent(ev->gbutton) is not { } nav || nav == ImGuiKey.None)
+                if (ConvertGamepadButtonEvent(ev->gbutton) is not { } key ||
+                    key == ImGuiKey.None)
                     break;
 
-                io.AddKeyEvent(nav, true);
+                io.AddKeyEvent(key, true);
                 break;
             }
+
+            //
+            // Handle when a gamepad axis position (such as a stick) has changed.
+            //
+
             case SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION:
             {
-                var (nav1, value1, nav2, value2) = ConvertGamepadAxisEvent(ev->gaxis);
-                if (nav1 != null)
-                    io.AddKeyAnalogEvent(nav1.Value, value1 != 0, value1);
-                if (nav2 != null)
-                    io.AddKeyAnalogEvent(nav2.Value, value2 != 0, value2);
+                var (key1, value1, key2, value2) =
+                    ConvertGamepadAxisEvent(ctxData, ev->gaxis);
+                if (key1 != null)
+                    io.AddKeyAnalogEvent(key1.Value, value1 != 0, value1);
+                if (key2 != null)
+                    io.AddKeyAnalogEvent(key2.Value, value2 != 0, value2);
                 break;
             }
+
+            //
+            // Handle when a mouse button has been released.
+            //
+
             case SDL_EventType.SDL_EVENT_MOUSE_BUTTON_UP:
             {
-                if (ConvertMouseButtonEvent(ev->button) is not { } nav)
+                if (ConvertMouseButtonEvent(ev->button) is not { } button)
                     break;
 
-                io.AddMouseButtonEvent((int)nav, false);
+                io.AddMouseButtonEvent((int)button, false);
                 break;
             }
+
+            //
+            // Handle when a mouse button has been pressed.
+            //
+
             case SDL_EventType.SDL_EVENT_MOUSE_BUTTON_DOWN:
             {
-                if (ConvertMouseButtonEvent(ev->button) is not { } nav)
+                if (ConvertMouseButtonEvent(ev->button) is not { } button)
                     break;
 
-                io.AddMouseButtonEvent((int)nav, true);
+                io.AddMouseButtonEvent((int)button, true);
                 break;
             }
+
+            //
+            // Handle when a mouse has changed position.
+            //
+
             case SDL_EventType.SDL_EVENT_MOUSE_MOTION:
             {
                 var evCopy = *ev;
-                SDL_ConvertEventToRenderCoordinates(_renderer, &evCopy)
-                    .AssertSdlZero();
+                if (SDL_ConvertEventToRenderCoordinates(ctxData.Renderer, &evCopy) != 0)
+                    Debug.WriteLine("Failed to convert event coordinates for mouse movement: {0}",
+                        [SDL_GetError()]);
 
-                io.AddMouseSourceEvent(ev->wheel.which == SDL_TOUCH_MOUSEID 
-                    ? ImGuiMouseSource.TouchScreen 
+                io.AddMouseSourceEvent(ev->wheel.which == SDL_TOUCH_MOUSEID
+                    ? ImGuiMouseSource.TouchScreen
                     : ImGuiMouseSource.Mouse);
 
                 io.AddMousePosEvent(evCopy.motion.x, evCopy.motion.y);
-                Console.WriteLine("{0},{1}", evCopy.motion.x, evCopy.motion.y);
                 break;
             }
+
+            //
+            // Handle when a mouse wheel has changed position.
+            //
+
             case SDL_EventType.SDL_EVENT_MOUSE_WHEEL:
             {
-                io.AddMouseSourceEvent(ev->wheel.which == SDL_TOUCH_MOUSEID 
-                    ? ImGuiMouseSource.TouchScreen 
+                io.AddMouseSourceEvent(ev->wheel.which == SDL_TOUCH_MOUSEID
+                    ? ImGuiMouseSource.TouchScreen
                     : ImGuiMouseSource.Mouse);
 
                 io.AddMouseWheelEvent(ev->wheel.x, ev->wheel.y);
                 break;
             }
+
+            //
+            // Handle when a keyboard key has been released.
+            //
+
             case SDL_EventType.SDL_EVENT_KEY_UP:
             {
-                if (ConvertKeyboardEventKey(ev->key) is not { } nav || nav == ImGuiKey.None)
+                if (ConvertKeyboardEventKey(ev->key) is not { } nav ||
+                    nav == ImGuiKey.None)
                     break;
 
                 UpdateKeyboardModifiers(ev->key.mod);
+                io.SetKeyEventNativeData(nav, (int)ev->key.key, (int)ev->key.scancode);
                 io.AddKeyEvent(nav, false);
                 break;
             }
+
+            //
+            // Handle when a keyboard key has been pressed down.
+            //
+
             case SDL_EventType.SDL_EVENT_KEY_DOWN:
             {
-                if (ConvertKeyboardEventKey(ev->key) is not { } nav || nav == ImGuiKey.None)
+                if (ConvertKeyboardEventKey(ev->key) is not { } nav ||
+                    nav == ImGuiKey.None)
                     break;
 
                 UpdateKeyboardModifiers(ev->key.mod);
+                io.SetKeyEventNativeData(nav, (int)ev->key.key, (int)ev->key.scancode);
                 io.AddKeyEvent(nav, true);
                 break;
             }
+
+            //
+            // Handle when text has been typed.
+            //
+
             case SDL_EventType.SDL_EVENT_TEXT_INPUT:
             {
-                if (ev->text.GetText() is not { } text || string.IsNullOrEmpty(text))
+                if (ev->text.GetText() is not { } text ||
+                    string.IsNullOrEmpty(text))
                     break;
 
                 io.AddInputCharactersUTF8(text);
@@ -271,18 +589,53 @@ public static unsafe class ImGuiSdl3
         }
     }
 
-    private static void PlatformSetImeData(IntPtr ctx, ImGuiViewport* viewport, ImGuiPlatformImeData* data)
+    /// <summary>
+    /// Handles when IME data is available for an ImGui context. This is called
+    /// directly by ImGui to obtain information about an input mechanism such
+    /// as a virtual keyboard, or to interact with such input mechanism.
+    /// </summary>
+    /// <param name="ctx">
+    /// ImGui context associated with the call.
+    /// </param>
+    /// <param name="viewport">
+    /// Viewport within which the data is requested.
+    /// </param>
+    /// <param name="data">
+    /// Event data.
+    /// </param>
+    private static void PlatformSetImeData(
+        IntPtr ctx,
+        ImGuiViewport* viewport,
+        ImGuiPlatformImeData* data)
     {
+        //
+        // Check to make sure we have initialized the current ImGui context.
+        //
+
+        if (!Contexts.TryGetValue(ctx, out var ctxData))
+            ImGuiSdl3Exception.ThrowContextNotInitialized(ctx);
+
+        //
+        // If the current IME window should close, or the focused window has
+        // changed, indicate to SDL to stop accepting input.
+        //
+
         var window = (SDL_Window*)viewport->PlatformHandle;
-        if ((data->WantVisible == 0 || _imeWindow != window) && _imeWindow != null)
+        if ((data->WantVisible == 0 || ctxData.ImeWindow != window) &&
+            ctxData.ImeWindow != null)
         {
-            SDL_StopTextInput(_imeWindow)
-                .AssertSdlZero();
-            _imeWindow = null;
+            if (SDL_StopTextInput(ctxData.ImeWindow) != 0)
+                ImGuiSdl3Exception.ThrowStopTextInputFailed(ctx);
+            ctxData.ImeWindow = null;
         }
 
         if (data->WantVisible == 0)
             return;
+
+        //
+        // If the IME window should be active, indicate to SDL to accept text
+        // input.
+        //
 
         var r = new SDL_Rect
         {
@@ -292,99 +645,253 @@ public static unsafe class ImGuiSdl3
             h = (int)data->InputLineHeight
         };
 
-        SDL_SetTextInputArea(window, &r, 0)
-            .AssertSdlZero();
+        if (SDL_SetTextInputArea(window, &r, 0) != 0)
+            ImGuiSdl3Exception.ThrowSetTextInputAreaFailed(ctx);
 
-        SDL_StartTextInput(window)
-            .AssertSdlZero();
+        if (SDL_StartTextInput(window) != 0)
+            ImGuiSdl3Exception.ThrowStartTextInputFailed(ctx);
 
-        _imeWindow = window;
+        ctxData.ImeWindow = window;
     }
 
-    private static float ScaleGamepadAxisValue(short raw) =>
-        raw switch
+    /// <summary>
+    /// Normalize raw gamepad axis input.
+    /// </summary>
+    /// <param name="raw">
+    /// Raw gamepad axis value from SDL, range -32768 to 32767.
+    /// </param>
+    /// <returns>
+    /// Normalized gamepad axis value, range -1.0 to 1.0.
+    /// </returns>
+    private static float ConvertGamepadAxisValue(short raw) =>
+        MathF.Min(MathF.Max(raw / 32767f, -1.0f), 1.0f);
+
+    /// <summary>
+    /// Normalize and apply dead zone scaling to raw gamepad axis input.
+    /// </summary>
+    /// <param name="ctxData">
+    /// Data for the current ImGui context.
+    /// </param>
+    /// <param name="raw">
+    /// Raw gamepad axis value from SDL, range -32768 to 32767.
+    /// </param>
+    /// <returns>
+    /// Normalized gamepad axis value, range -1.0 to 1.0.
+    /// </returns>
+    /// <remarks>
+    /// With the center at 0.0, the dead zone will ignore inputs x > 0 > -x.
+    /// </remarks>
+    private static float ScaleGamepadAxisValue(CtxData ctxData, short raw) =>
+        ConvertGamepadAxisValue(raw) switch
         {
-            >= -StickDeadZone and <= StickDeadZone => 0,
-            < 0 => (raw + StickDeadZone) / StickActiveZone,
-            > 0 => (raw - StickDeadZone) / StickActiveZone
+            var val when val <= -ctxData.StickDeadZone =>
+                (val + ctxData.StickDeadZone) / ctxData.StickActiveZone,
+            var val when val >= ctxData.StickDeadZone =>
+                (val - ctxData.StickDeadZone) / ctxData.StickActiveZone,
+            _ => 0
         };
 
-    private static (ImGuiKey? Input1, float Value1, ImGuiKey? Input2, float Value2) ConvertGamepadAxisValue(
+    /// <summary>
+    /// Convert a raw SDL gamepad value to bi-polar analog key data for ImGui.
+    /// </summary>
+    /// <param name="ctxData">
+    /// ImGui context data.
+    /// </param>
+    /// <param name="ev">
+    /// SDL event data.
+    /// </param>
+    /// <param name="negative">
+    /// ImGui key associated with negative values on the axis.
+    /// </param>
+    /// <param name="positive">
+    /// ImGui key associated with positive values on the axis.
+    /// </param>
+    /// <returns>
+    /// Bi-polar analog key data.
+    /// </returns>
+    private static GamepadEventValue ConvertGamepadAxisValue(
+        CtxData ctxData,
         SDL_GamepadAxisEvent ev,
         ImGuiKey negative,
         ImGuiKey positive) =>
-        ScaleGamepadAxisValue(ev.value) switch
+        ScaleGamepadAxisValue(ctxData, ev.value) switch
         {
             var x and < 0 => (negative, -x, positive, 0),
             var x and > 0 => (positive, x, negative, 0),
             _ => (positive, 0, negative, 0)
         };
 
-    private static (ImGuiKey? Input1, float Value1, ImGuiKey? Input2, float Value2) ConvertGamepadAxisEvent(
+    /// <summary>
+    /// Map SDL gamepad axis event data to ImGui key(s). In most cases,
+    /// moving one axis should update both opposing ImGui keys associated to it.
+    /// </summary>
+    /// <param name="ctxData">
+    /// ImGui context data.
+    /// </param>
+    /// <param name="ev">
+    /// SDL event data.
+    /// </param>
+    /// <returns>
+    /// Mapped gamepad event. One or both keys may be null if mappings do not
+    /// exist for them.
+    /// </returns>
+    private static GamepadEventValue ConvertGamepadAxisEvent(
+        CtxData ctxData,
         SDL_GamepadAxisEvent ev) =>
         ev.Axis switch
         {
-            < SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX or >= SDL_GamepadAxis.SDL_GAMEPAD_AXIS_MAX =>
+            < SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX or
+                >= SDL_GamepadAxis.SDL_GAMEPAD_AXIS_MAX =>
                 default,
+
             SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX =>
-                ConvertGamepadAxisValue(ev, ImGuiKey.GamepadLStickLeft, ImGuiKey.GamepadLStickRight),
+                ConvertGamepadAxisValue(ctxData, ev,
+                    ImGuiKey.GamepadLStickLeft, ImGuiKey.GamepadLStickRight),
+
             SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTY =>
-                ConvertGamepadAxisValue(ev, ImGuiKey.GamepadLStickUp, ImGuiKey.GamepadLStickDown),
+                ConvertGamepadAxisValue(ctxData, ev,
+                    ImGuiKey.GamepadLStickUp, ImGuiKey.GamepadLStickDown),
+
             SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTX =>
-                ConvertGamepadAxisValue(ev, ImGuiKey.GamepadRStickLeft, ImGuiKey.GamepadRStickRight),
+                ConvertGamepadAxisValue(ctxData, ev,
+                    ImGuiKey.GamepadRStickLeft, ImGuiKey.GamepadRStickRight),
+
             SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTY =>
-                ConvertGamepadAxisValue(ev, ImGuiKey.GamepadRStickUp, ImGuiKey.GamepadRStickDown),
+                ConvertGamepadAxisValue(ctxData, ev,
+                    ImGuiKey.GamepadRStickUp, ImGuiKey.GamepadRStickDown),
+
             SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFT_TRIGGER =>
-                ConvertGamepadAxisValue(ev, ImGuiKey.GamepadL2, ImGuiKey.GamepadL2),
+                ConvertGamepadAxisValue(ctxData, ev,
+                    ImGuiKey.GamepadL2, ImGuiKey.GamepadL2),
+
             SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHT_TRIGGER =>
-                ConvertGamepadAxisValue(ev, ImGuiKey.GamepadR2, ImGuiKey.GamepadR2)
+                ConvertGamepadAxisValue(ctxData, ev,
+                    ImGuiKey.GamepadR2, ImGuiKey.GamepadR2)
         };
 
-    private static ImGuiKey? ConvertGamepadButtonEvent(SDL_GamepadButtonEvent ev) =>
+    /// <summary>
+    /// Map SDL gamepad button event data to ImGui key.
+    /// </summary>
+    /// <param name="ev">
+    /// SDL event data.
+    /// </param>
+    /// <returns>
+    /// ImGui key. Will return null if no mapping exists.
+    /// </returns>
+    private static ImGuiKey? ConvertGamepadButtonEvent(
+        SDL_GamepadButtonEvent ev) =>
         ev.Button switch
         {
-            < SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH or >= SDL_GamepadButton.SDL_GAMEPAD_BUTTON_MAX => null,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH => ImGuiKey.GamepadFaceDown,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_EAST => ImGuiKey.GamepadFaceRight,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_WEST => ImGuiKey.GamepadFaceLeft,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_NORTH => ImGuiKey.GamepadFaceUp,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_SHOULDER => ImGuiKey.GamepadL1,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER => ImGuiKey.GamepadR1,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_STICK => ImGuiKey.GamepadL3,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_STICK => ImGuiKey.GamepadR3,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_UP => ImGuiKey.GamepadDpadUp,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_DOWN => ImGuiKey.GamepadDpadDown,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_LEFT => ImGuiKey.GamepadDpadLeft,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_RIGHT => ImGuiKey.GamepadDpadRight,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START => ImGuiKey.GamepadStart,
-            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_BACK => ImGuiKey.GamepadBack,
+            < SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH or
+                >= SDL_GamepadButton.SDL_GAMEPAD_BUTTON_MAX => null,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH =>
+                ImGuiKey.GamepadFaceDown,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_EAST =>
+                ImGuiKey.GamepadFaceRight,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_WEST =>
+                ImGuiKey.GamepadFaceLeft,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_NORTH =>
+                ImGuiKey.GamepadFaceUp,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_SHOULDER =>
+                ImGuiKey.GamepadL1,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER =>
+                ImGuiKey.GamepadR1,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_STICK =>
+                ImGuiKey.GamepadL3,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_STICK =>
+                ImGuiKey.GamepadR3,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_UP =>
+                ImGuiKey.GamepadDpadUp,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_DOWN =>
+                ImGuiKey.GamepadDpadDown,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_LEFT =>
+                ImGuiKey.GamepadDpadLeft,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_RIGHT =>
+                ImGuiKey.GamepadDpadRight,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START =>
+                ImGuiKey.GamepadStart,
+
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_BACK =>
+                ImGuiKey.GamepadBack,
+
             _ => null
         };
 
-    private static ImGuiMouseButton? ConvertMouseButtonEvent(SDL_MouseButtonEvent ev) =>
+    /// <summary>
+    /// Map SDL mouse button event data to an ImGui mouse button.
+    /// </summary>
+    /// <param name="ev">
+    /// SDL event data.
+    /// </param>
+    /// <returns>
+    /// ImGui mouse button index. Will return null if no mapping exists.
+    /// </returns>
+    private static ImGuiMouseButton? ConvertMouseButtonEvent(
+        SDL_MouseButtonEvent ev) =>
         ev.Button switch
         {
-            SDLButton.SDL_BUTTON_LEFT => ImGuiMouseButton.Left,
-            SDLButton.SDL_BUTTON_MIDDLE => ImGuiMouseButton.Middle,
-            SDLButton.SDL_BUTTON_RIGHT => ImGuiMouseButton.Right,
+            SDLButton.SDL_BUTTON_LEFT =>
+                ImGuiMouseButton.Left,
+
+            SDLButton.SDL_BUTTON_MIDDLE =>
+                ImGuiMouseButton.Middle,
+
+            SDLButton.SDL_BUTTON_RIGHT =>
+                ImGuiMouseButton.Right,
             _ => null
         };
 
+    /// <summary>
+    /// Notify ImGui of the current state of keyboard modifier keys.
+    /// </summary>
+    /// <param name="mod">
+    /// SDL key modifiers.
+    /// </param>
     private static void UpdateKeyboardModifiers(SDL_Keymod mod)
     {
         var io = ImGui.GetIO();
 
-        io.AddKeyEvent(ImGuiKey.ModCtrl, (mod & SDL_Keymod.SDL_KMOD_CTRL) != 0);
-        io.AddKeyEvent(ImGuiKey.ModAlt, (mod & SDL_Keymod.SDL_KMOD_ALT) != 0);
-        io.AddKeyEvent(ImGuiKey.ModShift, (mod & SDL_Keymod.SDL_KMOD_SHIFT) != 0);
-        io.AddKeyEvent(ImGuiKey.ModSuper, (mod & SDL_Keymod.SDL_KMOD_GUI) != 0);
+        io.AddKeyEvent(ImGuiKey.ModCtrl,
+            (mod & SDL_Keymod.SDL_KMOD_CTRL) != 0);
+
+        io.AddKeyEvent(ImGuiKey.ModAlt,
+            (mod & SDL_Keymod.SDL_KMOD_ALT) != 0);
+
+        io.AddKeyEvent(ImGuiKey.ModShift,
+            (mod & SDL_Keymod.SDL_KMOD_SHIFT) != 0);
+
+        io.AddKeyEvent(ImGuiKey.ModSuper,
+            (mod & SDL_Keymod.SDL_KMOD_GUI) != 0);
     }
 
+    /// <summary>
+    /// Map an SDL keyboard scan code to ImGui key.
+    /// </summary>
+    /// <param name="ev">
+    /// SDL event data.
+    /// </param>
+    /// <returns>
+    /// ImGui key. Will return null if no mapping exists.
+    /// </returns>
     private static ImGuiKey? ConvertKeyboardEventKey(SDL_KeyboardEvent ev)
     {
         var code = ev.scancode switch
         {
-            < SDL_Scancode.SDL_SCANCODE_A or >= SDL_Scancode.SDL_NUM_SCANCODES => ImGuiKey.None,
+            < SDL_Scancode.SDL_SCANCODE_A or
+                >= SDL_Scancode.SDL_NUM_SCANCODES => ImGuiKey.None,
             SDL_Scancode.SDL_SCANCODE_A => ImGuiKey.A,
             SDL_Scancode.SDL_SCANCODE_B => ImGuiKey.B,
             SDL_Scancode.SDL_SCANCODE_C => ImGuiKey.C,
@@ -500,82 +1007,154 @@ public static unsafe class ImGuiSdl3
         return code;
     }
 
-    private static void CreateFontTexture()
+    /// <summary>
+    /// Map an ImGui mouse cursor ID to an SDL mouse cursor ID.
+    /// </summary>
+    /// <param name="cursor">
+    /// ImGui mouse cursor ID.
+    /// </param>
+    /// <returns>
+    /// SDL mouse cursor ID.
+    /// </returns>
+    private static SDL_SystemCursor? GetCursorId(ImGuiMouseCursor cursor) =>
+        cursor switch
+        {
+            ImGuiMouseCursor.Arrow =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_DEFAULT,
+
+            ImGuiMouseCursor.TextInput =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_TEXT,
+
+            ImGuiMouseCursor.ResizeAll =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_MOVE,
+
+            ImGuiMouseCursor.ResizeNS =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_NS_RESIZE,
+
+            ImGuiMouseCursor.ResizeEW =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_EW_RESIZE,
+
+            ImGuiMouseCursor.ResizeNESW =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_NESW_RESIZE,
+
+            ImGuiMouseCursor.ResizeNWSE =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_NWSE_RESIZE,
+
+            ImGuiMouseCursor.Hand =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_POINTER,
+
+            ImGuiMouseCursor.NotAllowed =>
+                SDL_SystemCursor.SDL_SYSTEM_CURSOR_NOT_ALLOWED,
+
+            _ => null
+        };
+
+    /// <summary>
+    /// Set the visible mouse cursor.
+    /// </summary>
+    /// <param name="ctxData">
+    /// ImGui context data.
+    /// </param>
+    /// <param name="cursor">
+    /// ImGui mouse cursor ID.
+    /// </param>
+    private static void SetMouseCursor(
+        CtxData ctxData,
+        ImGuiMouseCursor cursor)
     {
-        var io = ImGui.GetIO();
-        io.Fonts.GetTexDataAsRGBA32(out IntPtr pixels, out var width, out var height);
+        //
+        // If the cursor should be hidden, do that.
+        //
 
-        var surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, pixels, width * 4);
-        var texture = SDL_CreateTextureFromSurface(_renderer, surface);
-
-        SDL_SetTextureBlendMode(texture, SDL_BlendMode.SDL_BLENDMODE_BLEND)
-            .AssertSdlZero();
-
-        SDL_SetTextureScaleMode(texture, SDL_ScaleMode.SDL_SCALEMODE_LINEAR)
-            .AssertSdlZero();
-
-        io.Fonts.SetTexID((IntPtr)texture);
-    }
-
-    private static void SetMouseCursor(ImGuiMouseCursor cursor)
-    {
         var index = (int)cursor;
 
         if (cursor == ImGuiMouseCursor.None)
         {
-            SDL_HideCursor()
-                .AssertSdlZero();
+            if (SDL_HideCursor() != 0)
+                Debug.WriteLine("Failed to hide cursor: {0}",
+                    [SDL_GetError()]);
             return;
         }
 
-        if (Cursors[index] == null)
-        {
-            var id = cursor switch
-            {
-                ImGuiMouseCursor.Arrow => SDL_SystemCursor.SDL_SYSTEM_CURSOR_DEFAULT,
-                ImGuiMouseCursor.TextInput => SDL_SystemCursor.SDL_SYSTEM_CURSOR_TEXT,
-                ImGuiMouseCursor.ResizeAll => SDL_SystemCursor.SDL_SYSTEM_CURSOR_MOVE,
-                ImGuiMouseCursor.ResizeNS => SDL_SystemCursor.SDL_SYSTEM_CURSOR_NS_RESIZE,
-                ImGuiMouseCursor.ResizeEW => SDL_SystemCursor.SDL_SYSTEM_CURSOR_EW_RESIZE,
-                ImGuiMouseCursor.ResizeNESW => SDL_SystemCursor.SDL_SYSTEM_CURSOR_NESW_RESIZE,
-                ImGuiMouseCursor.ResizeNWSE => SDL_SystemCursor.SDL_SYSTEM_CURSOR_NWSE_RESIZE,
-                ImGuiMouseCursor.Hand => SDL_SystemCursor.SDL_SYSTEM_CURSOR_POINTER,
-                ImGuiMouseCursor.NotAllowed => SDL_SystemCursor.SDL_SYSTEM_CURSOR_NOT_ALLOWED,
-                _ => (SDL_SystemCursor?)null
-            };
+        //
+        // If we have not cached the specified cursor, create and cache it.
+        //
 
+        if (ctxData.Cursors[index] == null)
+        {
+            var id = GetCursorId(cursor);
             if (id != null)
             {
                 var newCursor = SDL_CreateSystemCursor(id.Value);
-                AssertSdl.NotNull(newCursor);
-                Cursors[index] = newCursor;
+
+                if (newCursor == null)
+                    ImGuiSdl3Exception.ThrowCreateSystemCursorFailed(
+                        ctxData.Context,
+                        cursor,
+                        id.Value);
+
+                ctxData.Cursors[index] = newCursor;
             }
         }
 
-        if (Cursors[index] == null)
-        {
-            SDL_HideCursor()
-                .AssertSdlZero();
-        }
-        else
-        {
-            SDL_ShowCursor()
-                .AssertSdlZero();
+        //
+        // If there is no mouse cursor for the requested ID, just hide the
+        // cursor instead.
+        //
 
-            SDL_SetCursor(Cursors[index])
-                .AssertSdlZero();
+        if (ctxData.Cursors[index] == null)
+        {
+            if (SDL_HideCursor() != 0)
+                Debug.WriteLine("Failed to hide cursor: {0}",
+                    [SDL_GetError()]);
+            return;
         }
+
+        //
+        // Switch the currently shown cursor.
+        //
+
+        if (SDL_ShowCursor() != 0)
+            Debug.WriteLine("Failed to show cursor: {0}",
+                [SDL_GetError()]);
+
+        if (SDL_SetCursor(ctxData.Cursors[index]) != 0)
+            Debug.WriteLine("Failed to set cursor: {0}",
+                [SDL_GetError()]);
     }
 
-    private static void Render(SDL_Renderer* renderer, ImDrawDataPtr drawData)
+    /// <summary>
+    /// Interpret draw data into geometry rendering calls to SDL.
+    /// </summary>
+    /// <param name="ctxData">
+    /// ImGui context data.
+    /// </param>
+    /// <param name="drawData">
+    /// ImGui draw data.
+    /// </param>
+    private static void Render(CtxData ctxData, ImDrawDataPtr drawData)
     {
+        //
+        // Determine the window dimensions. DisplayPos is a 2D position that
+        // ImGui indicates all rendering shall be relative to. We initialize
+        // this as a Vector4 here so that it the arithmetic is trivial later.
+        //
+
         var io = ImGui.GetIO();
 
         var displayPos = drawData.DisplayPos;
-        var clipOff = new Vector4(displayPos.X, displayPos.Y, displayPos.X, displayPos.Y);
+
+        var clipOff = new Vector4(
+            displayPos.X,
+            displayPos.Y,
+            displayPos.X,
+            displayPos.Y);
 
         //
-        // Find the maximum number of vertices to allocate for.
+        // Find the maximum number of vertices to allocate data buffers for.
+        // Only vertex color conversion is needed; vertices and indices are
+        // directly referenced. This works because those tables are allocated
+        // in unmanaged memory and are organized by ImGui.
         //
 
         var maxNumVertices = 0;
@@ -603,15 +1182,31 @@ public static unsafe class ImGuiSdl3
                 var pcmd = cmdList.CmdBuffer[cmdI];
                 if (pcmd.UserCallback != IntPtr.Zero)
                 {
-                    Marshal.GetDelegateForFunctionPointer<ImGuiUserCallback>(pcmd.UserCallback)
+                    //
+                    // If a user callback is specified, call it instead of
+                    // the standard render pipeline below.
+                    //
+
+                    Marshal
+                        .GetDelegateForFunctionPointer<ImGuiUserCallback>(pcmd.UserCallback)
                         .Invoke(cmdList.NativePtr, pcmd.NativePtr);
                 }
                 else
                 {
+                    //
+                    // If a user callback is not specified, proceed to the
+                    // standard render pipeline.
+                    //
+
                     var bounds = pcmd.ClipRect - clipOff;
 
                     if (bounds.Z <= bounds.X || bounds.W <= bounds.Y)
                         continue;
+
+                    //
+                    // SDL clip rectangles do not use floats; these values
+                    // must be converted here.
+                    //
 
                     var clip = new SDL_Rect
                     {
@@ -621,12 +1216,26 @@ public static unsafe class ImGuiSdl3
                         h = (int)(bounds.W - bounds.Y)
                     };
 
-                    SDL_SetRenderClipRect(renderer, &clip)
-                        .AssertSdlZero();
+                    //
+                    // If the clip rect can't be set, skip rendering.
+                    //
+                    
+                    if (SDL_SetRenderClipRect(ctxData.Renderer, &clip) != 0)
+                        continue;
+
+                    //
+                    // Retrieve render properties from the command.
+                    //
 
                     var sdlTexture = (SDL_Texture*)pcmd.TextureId;
                     var idxBufferPtr = (ushort*)idxBuffer.Data + pcmd.IdxOffset;
                     var vtxBufferPtr = (ImDrawVert*)vtxBuffer.Data + pcmd.VtxOffset;
+
+                    //
+                    // Convert vertex color data from RGBA32 to SDL_FColor.
+                    // We use the fact that Vector4 and SDL_FColor are identical
+                    // at a binary level.
+                    //
 
                     for (var i = 0; i < vtxBuffer.Size; i++)
                     {
@@ -634,8 +1243,13 @@ public static unsafe class ImGuiSdl3
                         colorBuf[i] = new Vector4(src[0], src[1], src[2], src[3]) / 255;
                     }
 
-                    SDL_RenderGeometryRaw(
-                            renderer,
+                    //
+                    // Perform the render. Vertex and index data is used
+                    // directly from the source as it needs no conversion.
+                    //
+
+                    var renderResult = SDL_RenderGeometryRaw(
+                            ctxData.Renderer,
                             sdlTexture,
                             (float*)&vtxBufferPtr->pos,
                             sizeof(ImDrawVert),
@@ -646,13 +1260,21 @@ public static unsafe class ImGuiSdl3
                             (int)(vtxBuffer.Size - pcmd.VtxOffset),
                             (IntPtr)idxBufferPtr,
                             (int)pcmd.ElemCount,
-                            sizeof(ushort))
-                        .AssertSdlZero();
+                            sizeof(ushort));
+
+                    if (renderResult != 0)
+                        Debug.WriteLine("Failed to render geometry: {0}",
+                            [SDL_GetError()]);
                 }
             }
         }
 
+        //
+        // If ImGui has indicated the mouse cursor should be changed,
+        // do that here.
+        //
+
         if ((io.ConfigFlags & ImGuiConfigFlags.NoMouseCursorChange) == 0)
-            SetMouseCursor(ImGui.GetMouseCursor());
+            SetMouseCursor(ctxData, ImGui.GetMouseCursor());
     }
 }
