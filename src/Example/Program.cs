@@ -53,7 +53,7 @@ unsafe
     imGuiContext = ImGui.CreateContext();
     ImGui.SetCurrentContext(imGuiContext);
     ImGuiSdl3.Init(window, renderer);
-    
+
     //
     // Configure the ImGui context.
     //
@@ -86,7 +86,7 @@ unsafe
         while (SDL_PollEvent(&ev) != 0)
         {
             ImGuiSdl3.ProcessEvent(&ev);
-            
+
             //
             // Handle quit/close events from SDL.
             //
