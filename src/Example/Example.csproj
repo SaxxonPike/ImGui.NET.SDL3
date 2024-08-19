@@ -5,12 +5,17 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.0.1" />
     <PackageReference Include="JetBrains.Annotations" Version="2024.2.0" />
     <PackageReference Include="ppy.SDL3-CS" Version="2024.807.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ImGui.NET.SDL3\ImGui.NET.SDL3.csproj" />
   </ItemGroup>
 
 </Project>
