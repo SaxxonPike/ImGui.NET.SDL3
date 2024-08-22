@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.0.1" />
+    <PackageReference Include="Jab" Version="0.10.2" />
     <PackageReference Include="JetBrains.Annotations" Version="2024.2.0" />
     <PackageReference Include="ppy.SDL3-CS" Version="2024.807.1" />
   </ItemGroup>
