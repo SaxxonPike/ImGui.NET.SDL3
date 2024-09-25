@@ -795,7 +795,7 @@ public static unsafe class ImGuiSdl3
         ev.Axis switch
         {
             < SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX or
-                >= SDL_GamepadAxis.SDL_GAMEPAD_AXIS_MAX =>
+                >= SDL_GamepadAxis.SDL_GAMEPAD_AXIS_COUNT =>
                 default,
 
             SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX =>
@@ -837,7 +837,7 @@ public static unsafe class ImGuiSdl3
         ev.Button switch
         {
             < SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH or
-                >= SDL_GamepadButton.SDL_GAMEPAD_BUTTON_MAX => null,
+                >= SDL_GamepadButton.SDL_GAMEPAD_BUTTON_COUNT => null,
 
             SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH =>
                 ImGuiKey.GamepadFaceDown,
@@ -945,7 +945,7 @@ public static unsafe class ImGuiSdl3
         var code = ev.scancode switch
         {
             < SDL_Scancode.SDL_SCANCODE_A or
-                >= SDL_Scancode.SDL_NUM_SCANCODES => ImGuiKey.None,
+                >= SDL_Scancode.SDL_SCANCODE_COUNT => ImGuiKey.None,
             SDL_Scancode.SDL_SCANCODE_A => ImGuiKey.A,
             SDL_Scancode.SDL_SCANCODE_B => ImGuiKey.B,
             SDL_Scancode.SDL_SCANCODE_C => ImGuiKey.C,
@@ -1193,8 +1193,6 @@ public static unsafe class ImGuiSdl3
         // ImGui indicates all rendering shall be relative to. We initialize
         // this as a Vector4 here so that it the arithmetic is trivial later.
         //
-
-        var io = ImGui.GetIO();
 
         var displayPos = drawData.DisplayPos;
 
