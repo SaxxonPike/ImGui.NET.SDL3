@@ -204,12 +204,12 @@ public static unsafe class ImGuiSdl3
 
         if (SDL_SetTextureBlendMode(
                 texture,
-                SDL_BlendMode.SDL_BLENDMODE_BLEND) != 0)
+                SDL_BlendMode.SDL_BLENDMODE_BLEND) == 0)
             ImGuiSdl3Exception.ThrowBlendModeFailed(ctx, texId);
 
         if (SDL_SetTextureScaleMode(
                 texture,
-                SDL_ScaleMode.SDL_SCALEMODE_LINEAR) != 0)
+                SDL_ScaleMode.SDL_SCALEMODE_LINEAR) == 0)
             ImGuiSdl3Exception.ThrowScaleModeFailed(ctx, texId);
 
         io.Fonts.SetTexID(texId);
@@ -295,11 +295,11 @@ public static unsafe class ImGuiSdl3
         //
 
         int width, height;
-        if (SDL_GetRenderOutputSize(ctxData.Renderer, &width, &height) != 0)
+        if (SDL_GetRenderOutputSize(ctxData.Renderer, &width, &height) == 0)
             (width, height) = (0, 0);
 
         float scaleX, scaleY;
-        if (SDL_GetRenderScale(ctxData.Renderer, &scaleX, &scaleY) != 0)
+        if (SDL_GetRenderScale(ctxData.Renderer, &scaleX, &scaleY) == 0)
             (scaleX, scaleY) = (1, 1);
 
         io.DisplaySize.X = width;
@@ -349,7 +349,7 @@ public static unsafe class ImGuiSdl3
 
         ctxData.BegunFrame = false;
 
-        if (SDL_FlushRenderer(ctxData.Renderer) != 0)
+        if (SDL_FlushRenderer(ctxData.Renderer) == 0)
             Debug.WriteLine("Failed to flush renderer before render: {0}",
                 [SDL_GetError()]);
 
@@ -367,14 +367,14 @@ public static unsafe class ImGuiSdl3
 
         if (hasViewport)
         {
-            if (SDL_GetRenderViewport(ctxData.Renderer, &oldViewport) != 0)
+            if (SDL_GetRenderViewport(ctxData.Renderer, &oldViewport) == 0)
                 Debug.WriteLine("Failed to retrieve render viewport: {0}",
                     [SDL_GetError()]);
         }
 
         if (hasClipRect)
         {
-            if (SDL_GetRenderClipRect(ctxData.Renderer, &oldClipRect) != 0)
+            if (SDL_GetRenderClipRect(ctxData.Renderer, &oldClipRect) == 0)
                 Debug.WriteLine("Failed to retrieve render clip rectangle: {0}",
                     [SDL_GetError()]);
         }
@@ -389,7 +389,7 @@ public static unsafe class ImGuiSdl3
         // Make sure SDL finishes rendering ImGui elements.
         //
 
-        if (SDL_FlushRenderer(ctxData.Renderer) != 0)
+        if (SDL_FlushRenderer(ctxData.Renderer) == 0)
             Debug.WriteLine("Failed to flush renderer after render: {0}",
                 [SDL_GetError()]);
 
@@ -399,26 +399,26 @@ public static unsafe class ImGuiSdl3
 
         if (hasViewport)
         {
-            if (SDL_SetRenderViewport(ctxData.Renderer, &oldViewport) != 0)
+            if (SDL_SetRenderViewport(ctxData.Renderer, &oldViewport) == 0)
                 Debug.WriteLine("Failed to set render viewport after render: {0}",
                     [SDL_GetError()]);
         }
         else
         {
-            if (SDL_SetRenderViewport(ctxData.Renderer, null) != 0)
+            if (SDL_SetRenderViewport(ctxData.Renderer, null) == 0)
                 Debug.WriteLine("Failed to set render viewport after render: {0}",
                     [SDL_GetError()]);
         }
 
         if (hasClipRect)
         {
-            if (SDL_SetRenderClipRect(ctxData.Renderer, &oldClipRect) != 0)
+            if (SDL_SetRenderClipRect(ctxData.Renderer, &oldClipRect) == 0)
                 Debug.WriteLine("Failed to set clip rectangle after render: {0}",
                     [SDL_GetError()]);
         }
         else
         {
-            if (SDL_SetRenderClipRect(ctxData.Renderer, null) != 0)
+            if (SDL_SetRenderClipRect(ctxData.Renderer, null) == 0)
                 Debug.WriteLine("Failed to set clip rectangle after render: {0}",
                     [SDL_GetError()]);
         }
@@ -528,7 +528,7 @@ public static unsafe class ImGuiSdl3
             case SDL_EventType.SDL_EVENT_MOUSE_MOTION:
             {
                 var evCopy = *ev;
-                if (SDL_ConvertEventToRenderCoordinates(ctxData.Renderer, &evCopy) != 0)
+                if (SDL_ConvertEventToRenderCoordinates(ctxData.Renderer, &evCopy) == 0)
                     Debug.WriteLine("Failed to convert event coordinates for mouse movement: {0}",
                         [SDL_GetError()]);
 
@@ -635,7 +635,7 @@ public static unsafe class ImGuiSdl3
     /// </summary>
     private static void SetClipboard(IntPtr ctx, string? data)
     {
-        if (SDL_SetClipboardText(data) != 0)
+        if (SDL_SetClipboardText(data) == 0)
             Debug.WriteLine("Failed to set clipboard: {0}",
                 [SDL_GetError()]);
     }
@@ -678,7 +678,7 @@ public static unsafe class ImGuiSdl3
         if ((data->WantVisible == 0 || ctxData.ImeWindow != window) &&
             ctxData.ImeWindow != null)
         {
-            if (SDL_StopTextInput(ctxData.ImeWindow) != 0)
+            if (SDL_StopTextInput(ctxData.ImeWindow) == 0)
                 ImGuiSdl3Exception.ThrowStopTextInputFailed(ctx);
             ctxData.ImeWindow = null;
         }
@@ -699,10 +699,10 @@ public static unsafe class ImGuiSdl3
             h = (int)data->InputLineHeight
         };
 
-        if (SDL_SetTextInputArea(window, &r, 0) != 0)
+        if (SDL_SetTextInputArea(window, &r, 0) == 0)
             ImGuiSdl3Exception.ThrowSetTextInputAreaFailed(ctx);
 
-        if (SDL_StartTextInput(window) != 0)
+        if (SDL_StartTextInput(window) == 0)
             ImGuiSdl3Exception.ThrowStartTextInputFailed(ctx);
 
         ctxData.ImeWindow = window;
@@ -1124,7 +1124,7 @@ public static unsafe class ImGuiSdl3
 
         if (cursor == ImGuiMouseCursor.None)
         {
-            if (SDL_HideCursor() != 0)
+            if (SDL_HideCursor() == 0)
                 Debug.WriteLine("Failed to hide cursor: {0}",
                     [SDL_GetError()]);
             return;
@@ -1158,7 +1158,7 @@ public static unsafe class ImGuiSdl3
 
         if (ctxData.Cursors[index] == null)
         {
-            if (SDL_HideCursor() != 0)
+            if (SDL_HideCursor() == 0)
                 Debug.WriteLine("Failed to hide cursor: {0}",
                     [SDL_GetError()]);
             return;
@@ -1168,11 +1168,11 @@ public static unsafe class ImGuiSdl3
         // Switch the currently shown cursor.
         //
 
-        if (SDL_ShowCursor() != 0)
+        if (SDL_ShowCursor() == 0)
             Debug.WriteLine("Failed to show cursor: {0}",
                 [SDL_GetError()]);
 
-        if (SDL_SetCursor(ctxData.Cursors[index]) != 0)
+        if (SDL_SetCursor(ctxData.Cursors[index]) == 0)
             Debug.WriteLine("Failed to set cursor: {0}",
                 [SDL_GetError()]);
     }
@@ -1272,7 +1272,7 @@ public static unsafe class ImGuiSdl3
                     // If the clip rect can't be set, skip rendering.
                     //
 
-                    if (SDL_SetRenderClipRect(ctxData.Renderer, &clip) != 0)
+                    if (SDL_SetRenderClipRect(ctxData.Renderer, &clip) == 0)
                         continue;
 
                     //
@@ -1314,7 +1314,7 @@ public static unsafe class ImGuiSdl3
                         (int)pcmd.ElemCount,
                         sizeof(ushort));
 
-                    if (renderResult != 0)
+                    if (renderResult == 0)
                         Debug.WriteLine("Failed to render geometry: {0}",
                             [SDL_GetError()]);
                 }

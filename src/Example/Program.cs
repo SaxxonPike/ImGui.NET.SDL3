@@ -1,4 +1,5 @@
-﻿using System.Numerics;
+﻿using System.Diagnostics;
+using System.Numerics;
 using ImGuiNET;
 using ImGuiNET.SDL3;
 using SDL;
@@ -22,7 +23,7 @@ AppDomain.CurrentDomain.UnhandledException += (_, _) => ShutDown();
 
 if (SDL_Init(SDL_InitFlags.SDL_INIT_GAMEPAD |
              SDL_InitFlags.SDL_INIT_VIDEO |
-             SDL_InitFlags.SDL_INIT_EVENTS) != 0)
+             SDL_InitFlags.SDL_INIT_EVENTS) == 0)
     throw new Exception($"Failed to initialize SDL: {SDL_GetError()}");
 
 sdlInitialized = true;
@@ -43,7 +44,7 @@ unsafe
             SDL_WindowFlags.SDL_WINDOW_RESIZABLE,
             &window,
             &renderer
-        ) != 0)
+        ) == 0)
         throw new Exception($"Failed to create window: {SDL_GetError()}");
 
     //
@@ -79,8 +80,8 @@ unsafe
     var done = false;
     var clearColor = new Vector4(0.45f, 0.55f, 0.60f, 1.00f);
 
-    if (SDL_SetRenderVSync(renderer, 1) != 0)
-        throw new Exception($"Failed to set Vsync: {SDL_GetError()}");
+    if (SDL_SetRenderVSync(renderer, 1) == 0)
+        Debug.WriteLine($"Failed to set Vsync: {SDL_GetError()}");
 
     //
     // Main event loop.
@@ -166,10 +167,10 @@ unsafe
         // Clear the render buffer. This begins our per-frame draw calls to SDL.
         //
 
-        if (SDL_SetRenderDrawColorFloat(renderer, clearColor.X, clearColor.Y, clearColor.Z, clearColor.W) != 0)
+        if (SDL_SetRenderDrawColorFloat(renderer, clearColor.X, clearColor.Y, clearColor.Z, clearColor.W) == 0)
             throw new Exception($"Failed to set render draw color: {SDL_GetError()}");
 
-        if (SDL_RenderClear(renderer) != 0)
+        if (SDL_RenderClear(renderer) == 0)
             throw new Exception($"Failed to clear: {SDL_GetError()}");
 
         //
@@ -183,7 +184,7 @@ unsafe
         // Presents the frame buffer to the window.
         //
 
-        if (SDL_RenderPresent(renderer) != 0)
+        if (SDL_RenderPresent(renderer) == 0)
             throw new Exception($"Failed to present: {SDL_GetError()}");
     }
 }
