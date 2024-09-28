@@ -361,10 +361,8 @@ public static unsafe class ImGuiSdl3
         // surface.
         //
 
-        var hasViewport =
-            SDL_RenderViewportSet(ctxData.Renderer) == SDL_bool.SDL_TRUE;
-        var hasClipRect =
-            SDL_RenderClipEnabled(ctxData.Renderer) == SDL_bool.SDL_TRUE;
+        var hasViewport = SDL_RenderViewportSet(ctxData.Renderer) != 0;
+        var hasClipRect = SDL_RenderClipEnabled(ctxData.Renderer) != 0;
         var oldViewport = default(SDL_Rect);
         var oldClipRect = default(SDL_Rect);
 
@@ -1302,10 +1300,9 @@ public static unsafe class ImGuiSdl3
                     // directly from the source as it needs no conversion.
                     //
 
-                    SDL_bool renderResult;
                     fixed (Vector4* colorBufPtr = colorBuf)
                     {
-                        renderResult = SDL_RenderGeometryRaw(
+                        var renderResult = SDL_RenderGeometryRaw(
                             ctxData.Renderer,
                             sdlTexture,
                             (float*)&vtxBufferPtr->pos,
@@ -1318,11 +1315,11 @@ public static unsafe class ImGuiSdl3
                             (IntPtr)idxBufferPtr,
                             (int)pcmd.ElemCount,
                             sizeof(ushort));
-                    }
 
-                    if (renderResult == 0)
-                        Debug.WriteLine("Failed to render geometry: {0}",
-                            [SDL_GetError()]);
+                        if (renderResult == 0)
+                            Debug.WriteLine("Failed to render geometry: {0}",
+                                [SDL_GetError()]);
+                    }
                 }
             }
         }
