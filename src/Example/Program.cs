@@ -22,7 +22,7 @@ AppDomain.CurrentDomain.UnhandledException += (_, _) => ShutDown();
 
 if (SDL_Init(SDL_InitFlags.SDL_INIT_GAMEPAD |
              SDL_InitFlags.SDL_INIT_VIDEO |
-             SDL_InitFlags.SDL_INIT_EVENTS) != 0)
+             SDL_InitFlags.SDL_INIT_EVENTS) == 0)
     throw new Exception($"Failed to initialize SDL: {SDL_GetError()}");
 
 sdlInitialized = true;
