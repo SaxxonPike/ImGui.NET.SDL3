@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -92,6 +93,13 @@ public static unsafe class ImGuiSdl3
     }
 
     /// <summary>
+    /// This hack is used to swap horizontal scrolling on OSX, which seems to
+    /// behave opposite what is expected.
+    /// </summary>
+    private static float HorizontalScrollFactor =
+        RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? -1f : 1f;
+
+    /// <summary>
     /// Initialize this backend for the current ImGui context. If the context
     /// has already been initialized with the specified window and renderer,
     /// this call does nothing.
@@ -129,7 +137,7 @@ public static unsafe class ImGuiSdl3
         // Set up backend IO flags. These tell ImGui what is supported by this
         // backend.
         //
-        
+
         var io = ImGui.GetIO();
 
         io.BackendFlags = ImGuiBackendFlags.RendererHasVtxOffset |
@@ -343,15 +351,10 @@ public static unsafe class ImGuiSdl3
             return;
 
         //
-        // Indicate the end of this frame and make sure SDL render buffers
-        // are flushed.
+        // Indicate the end of this frame.
         //
 
         ctxData.BegunFrame = false;
-
-        if (SDL_FlushRenderer(ctxData.Renderer) == 0)
-            Debug.WriteLine("Failed to flush renderer before render: {0}",
-                [SDL_GetError()]);
 
         //
         // Preserve viewport and render clip settings on the SDL render
@@ -384,14 +387,6 @@ public static unsafe class ImGuiSdl3
         //
 
         Render(ctxData, drawData);
-
-        //
-        // Make sure SDL finishes rendering ImGui elements.
-        //
-
-        if (SDL_FlushRenderer(ctxData.Renderer) == 0)
-            Debug.WriteLine("Failed to flush renderer after render: {0}",
-                [SDL_GetError()]);
 
         //
         // Restore preserved render state.
@@ -532,7 +527,7 @@ public static unsafe class ImGuiSdl3
                     Debug.WriteLine("Failed to convert event coordinates for mouse movement: {0}",
                         [SDL_GetError()]);
 
-                io.AddMouseSourceEvent(ev->wheel.which == SDL_TOUCH_MOUSEID
+                io.AddMouseSourceEvent(ev->motion.which == SDL_TOUCH_MOUSEID
                     ? ImGuiMouseSource.TouchScreen
                     : ImGuiMouseSource.Mouse);
 
@@ -550,7 +545,7 @@ public static unsafe class ImGuiSdl3
                     ? ImGuiMouseSource.TouchScreen
                     : ImGuiMouseSource.Mouse);
 
-                io.AddMouseWheelEvent(ev->wheel.x, ev->wheel.y);
+                io.AddMouseWheelEvent(ev->wheel.x * HorizontalScrollFactor, ev->wheel.y);
                 break;
             }
 
@@ -1217,7 +1212,14 @@ public static unsafe class ImGuiSdl3
                 maxNumVertices = numVertices;
         }
 
-        var colorBuf = stackalloc Vector4[maxNumVertices];
+        //
+        // Element counts can get rather large; previous implementations of
+        // this used the stack, but that can lead to overflow with particularly
+        // complex UIs. We will use MemoryPool to recycle memory spans.
+        //
+
+        using var colorMem = MemoryPool<Vector4>.Shared.Rent(maxNumVertices);
+        var colorBuf = colorMem.Memory.Span;
 
         //
         // Process command lists.
@@ -1228,7 +1230,7 @@ public static unsafe class ImGuiSdl3
             var cmdList = drawData.CmdLists[n];
             var vtxBuffer = cmdList.VtxBuffer;
             var idxBuffer = cmdList.IdxBuffer;
-            
+
             for (var cmdI = 0; cmdI < cmdList.CmdBuffer.Size; cmdI++)
             {
                 var pcmd = cmdList.CmdBuffer[cmdI];
@@ -1300,19 +1302,23 @@ public static unsafe class ImGuiSdl3
                     // directly from the source as it needs no conversion.
                     //
 
-                    var renderResult = SDL_RenderGeometryRaw(
-                        ctxData.Renderer,
-                        sdlTexture,
-                        (float*)&vtxBufferPtr->pos,
-                        sizeof(ImDrawVert),
-                        (SDL_FColor*)colorBuf,
-                        sizeof(SDL_FColor),
-                        (float*)&vtxBufferPtr->uv,
-                        sizeof(ImDrawVert),
-                        (int)(vtxBuffer.Size - pcmd.VtxOffset),
-                        (IntPtr)idxBufferPtr,
-                        (int)pcmd.ElemCount,
-                        sizeof(ushort));
+                    SDL_bool renderResult;
+                    fixed (Vector4* colorBufPtr = colorBuf)
+                    {
+                        renderResult = SDL_RenderGeometryRaw(
+                            ctxData.Renderer,
+                            sdlTexture,
+                            (float*)&vtxBufferPtr->pos,
+                            sizeof(ImDrawVert),
+                            (SDL_FColor*)colorBufPtr,
+                            sizeof(SDL_FColor),
+                            (float*)&vtxBufferPtr->uv,
+                            sizeof(ImDrawVert),
+                            (int)(vtxBuffer.Size - pcmd.VtxOffset),
+                            (IntPtr)idxBufferPtr,
+                            (int)pcmd.ElemCount,
+                            sizeof(ushort));
+                    }
 
                     if (renderResult == 0)
                         Debug.WriteLine("Failed to render geometry: {0}",
