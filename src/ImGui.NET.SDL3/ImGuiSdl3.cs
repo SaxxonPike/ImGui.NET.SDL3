@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -1224,97 +1225,82 @@ public static unsafe class ImGuiSdl3
         // complex UIs. We will use MemoryPool to recycle memory spans.
         //
 
-        var colorPtr = (SDL_FColor*)NativeMemory.AlignedAlloc(
-            (uint)(sizeof(SDL_FColor) * maxNumVertices),
-            unchecked((uint)sizeof(SDL_FColor)));
+        using var colors = MemoryPool<Vector4>.Shared.Rent(maxNumVertices);
 
-        try
+        //
+        // Process command lists.
+        //
+
+        for (var n = 0; n < drawData.CmdListsCount; n++)
         {
-            //
-            // Process command lists.
-            //
+            var cmdList = drawData.CmdLists[n];
+            var vtxBuffer = cmdList.VtxBuffer;
+            var idxBuffer = cmdList.IdxBuffer;
 
-            for (var n = 0; n < drawData.CmdListsCount; n++)
+            for (var cmdI = 0; cmdI < cmdList.CmdBuffer.Size; cmdI++)
             {
-                var cmdList = drawData.CmdLists[n];
-                var vtxBuffer = cmdList.VtxBuffer;
-                var idxBuffer = cmdList.IdxBuffer;
-
-                for (var cmdI = 0; cmdI < cmdList.CmdBuffer.Size; cmdI++)
+                var pcmd = cmdList.CmdBuffer[cmdI];
+                if (pcmd.UserCallback != IntPtr.Zero)
                 {
-                    var pcmd = cmdList.CmdBuffer[cmdI];
-                    if (pcmd.UserCallback != IntPtr.Zero)
+                    //
+                    // If a user callback is specified, call it instead of
+                    // the standard render pipeline below.
+                    //
+
+                    Marshal
+                        .GetDelegateForFunctionPointer<ImGuiUserCallback>(pcmd.UserCallback)
+                        .Invoke(cmdList.NativePtr, pcmd.NativePtr);
+                }
+                else
+                {
+                    //
+                    // If a user callback is not specified, proceed to the
+                    // standard render pipeline.
+                    //
+
+                    var bounds = pcmd.ClipRect - clipOff;
+
+                    if (bounds.Z <= bounds.X || bounds.W <= bounds.Y)
+                        continue;
+
+                    //
+                    // SDL clip rectangles do not use floats; these values
+                    // must be converted here.
+                    //
+
+                    var clip = new SDL_Rect
                     {
-                        //
-                        // If a user callback is specified, call it instead of
-                        // the standard render pipeline below.
-                        //
+                        x = (int)bounds.X,
+                        y = (int)bounds.Y,
+                        w = (int)(bounds.Z - bounds.X),
+                        h = (int)(bounds.W - bounds.Y)
+                    };
 
-                        Marshal
-                            .GetDelegateForFunctionPointer<ImGuiUserCallback>(pcmd.UserCallback)
-                            .Invoke(cmdList.NativePtr, pcmd.NativePtr);
-                    }
-                    else
+                    //
+                    // If the clip rect can't be set, skip rendering.
+                    //
+
+                    if (SDL_SetRenderClipRect(ctxData.Renderer, &clip) == 0)
+                        continue;
+
+                    //
+                    // Retrieve render properties from the command.
+                    //
+
+                    var sdlTexture = (SDL_Texture*)pcmd.TextureId;
+                    var idxBufferPtr = (ushort*)idxBuffer.Data + pcmd.IdxOffset;
+                    var vtxBufferPtr = (ImDrawVert*)vtxBuffer.Data + pcmd.VtxOffset;
+
+                    fixed (Vector4* colorPtr = colors.Memory.Span)
                     {
-                        //
-                        // If a user callback is not specified, proceed to the
-                        // standard render pipeline.
-                        //
-
-                        var bounds = pcmd.ClipRect - clipOff;
-
-                        if (bounds.Z <= bounds.X || bounds.W <= bounds.Y)
-                            continue;
-
-                        //
-                        // SDL clip rectangles do not use floats; these values
-                        // must be converted here.
-                        //
-
-                        var clip = new SDL_Rect
-                        {
-                            x = (int)bounds.X,
-                            y = (int)bounds.Y,
-                            w = (int)(bounds.Z - bounds.X),
-                            h = (int)(bounds.W - bounds.Y)
-                        };
-
-                        //
-                        // If the clip rect can't be set, skip rendering.
-                        //
-
-                        if (SDL_SetRenderClipRect(ctxData.Renderer, &clip) == 0)
-                            continue;
-
-                        //
-                        // Retrieve render properties from the command.
-                        //
-
-                        var sdlTexture = (SDL_Texture*)pcmd.TextureId;
-                        var idxBufferPtr = (ushort*)idxBuffer.Data + pcmd.IdxOffset;
-                        var vtxBufferPtr = (ImDrawVert*)vtxBuffer.Data + pcmd.VtxOffset;
-
                         //
                         // Convert vertex color data from RGBA32 to SDL_FColor.
-                        // 128-bit vector operations are used to accomplish this:
-                        //
-                        // - load color value into four 32-bit registers
-                        // - mask register bits for each color component
-                        // - convert registers to float
-                        // - normalize color values to 0-1
                         //
 
                         for (var i = 0; i < vtxBuffer.Size; i++)
                         {
                             var col = (byte*)&vtxBufferPtr[i].col;
-                            Vector128.Divide(
-                                Vector128.ConvertToSingle(
-                                    Vector128.Create(
-                                        col[0], col[1], col[2], col[3]
-                                    )
-                                ),
-                                255f
-                            ).StoreAligned((float*)&colorPtr[i]);
+                            colorPtr[i] = new Vector4(col[0], col[1], col[2], col[3]) / 255f;
                         }
 
                         //
@@ -1327,7 +1313,7 @@ public static unsafe class ImGuiSdl3
                             sdlTexture,
                             (float*)&vtxBufferPtr->pos,
                             sizeof(ImDrawVert),
-                            colorPtr,
+                            (SDL_FColor*)colorPtr,
                             sizeof(SDL_FColor),
                             (float*)&vtxBufferPtr->uv,
                             sizeof(ImDrawVert),
@@ -1342,10 +1328,6 @@ public static unsafe class ImGuiSdl3
                     }
                 }
             }
-        }
-        finally
-        {
-            NativeMemory.AlignedFree(colorPtr);
         }
     }
 }
