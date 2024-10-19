@@ -21,9 +21,9 @@ AppDomain.CurrentDomain.UnhandledException += (_, _) => ShutDown();
 // Gamepad is included here for demonstration.
 //
 
-if (SDL_Init(SDL_InitFlags.SDL_INIT_GAMEPAD |
+if (!SDL_Init(SDL_InitFlags.SDL_INIT_GAMEPAD |
              SDL_InitFlags.SDL_INIT_VIDEO |
-             SDL_InitFlags.SDL_INIT_EVENTS) == 0)
+             SDL_InitFlags.SDL_INIT_EVENTS))
     throw new Exception($"Failed to initialize SDL: {SDL_GetError()}");
 
 sdlInitialized = true;
@@ -37,14 +37,14 @@ unsafe
     SDL_Window* window = default;
     SDL_Renderer* renderer = default;
 
-    if (SDL_CreateWindowAndRenderer(
+    if (!SDL_CreateWindowAndRenderer(
             "ImGui.NET.SDL3 Example",
             1280,
             720,
             SDL_WindowFlags.SDL_WINDOW_RESIZABLE,
             &window,
             &renderer
-        ) == 0)
+        ))
         throw new Exception($"Failed to create window: {SDL_GetError()}");
 
     //
@@ -80,7 +80,7 @@ unsafe
     var done = false;
     var clearColor = new Vector4(0.45f, 0.55f, 0.60f, 1.00f);
 
-    if (SDL_SetRenderVSync(renderer, 1) == 0)
+    if (!SDL_SetRenderVSync(renderer, 1))
         Debug.WriteLine($"Failed to set Vsync: {SDL_GetError()}");
 
     //
@@ -93,7 +93,7 @@ unsafe
         // Process pending SDL events.
         //
 
-        while (SDL_PollEvent(&ev) != 0)
+        while (SDL_PollEvent(&ev))
         {
             ImGuiSdl3.ProcessEvent(&ev);
 
@@ -167,10 +167,10 @@ unsafe
         // Clear the render buffer. This begins our per-frame draw calls to SDL.
         //
 
-        if (SDL_SetRenderDrawColorFloat(renderer, clearColor.X, clearColor.Y, clearColor.Z, clearColor.W) == 0)
+        if (!SDL_SetRenderDrawColorFloat(renderer, clearColor.X, clearColor.Y, clearColor.Z, clearColor.W))
             throw new Exception($"Failed to set render draw color: {SDL_GetError()}");
 
-        if (SDL_RenderClear(renderer) == 0)
+        if (!SDL_RenderClear(renderer))
             throw new Exception($"Failed to clear: {SDL_GetError()}");
 
         //
@@ -184,7 +184,7 @@ unsafe
         // Presents the frame buffer to the window.
         //
 
-        if (SDL_RenderPresent(renderer) == 0)
+        if (!SDL_RenderPresent(renderer))
             throw new Exception($"Failed to present: {SDL_GetError()}");
     }
 }
