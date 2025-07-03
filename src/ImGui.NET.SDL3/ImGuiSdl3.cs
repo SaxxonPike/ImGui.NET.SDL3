@@ -306,8 +306,9 @@ public static unsafe class ImGuiSdl3
         var now = SDL_GetTicksNS();
         var elapsed = now - ctxData.LastTime;
 
-
-        io.DeltaTime = elapsed / (float)SDL_NS_PER_SECOND;
+        io.DeltaTime = (float)TimeSpan
+            .FromTicks(unchecked((long)(elapsed / TimeSpan.NanosecondsPerTick)))
+            .TotalSeconds;
 
         //
         // Determine the render size and scale for this frame.
