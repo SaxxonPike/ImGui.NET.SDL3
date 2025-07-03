@@ -179,13 +179,15 @@ public static unsafe class ImGuiSdl3
         // GC does not free them.
         //
 
-        io.PlatformSetImeDataFn = Marshal.GetFunctionPointerForDelegate(
+        var pio = ImGui.GetPlatformIO();
+
+        pio.Platform_SetImeDataFn = Marshal.GetFunctionPointerForDelegate(
             ctxData.PlatformSetImeDataCallback!);
 
-        io.GetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
+        pio.Platform_GetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
             ctxData.GetClipboardCallback!);
 
-        io.SetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
+        pio.Platform_SetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(
             ctxData.SetClipboardCallback!);
 
         //
